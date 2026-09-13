@@ -190,8 +190,15 @@ async def llama_index_complete(
             stacklevel=2,
         )
     kwargs.pop("response_format", None)
+    # hashing_kv is injected by LightRAG on every llm_model_func call for
+    # caching and llama_index_complete_if_cache has no **kwargs catch-all
+    # to absorb it. llm_instance must be popped rather than read, otherwise
+    # it is forwarded twice: once positionally below and once through the
+    # remaining **kwargs.
+    kwargs.pop("hashing_kv", None)
+    llm_instance = kwargs.pop("llm_instance", None)
     result = await llama_index_complete_if_cache(
-        kwargs.get("llm_instance"),
+        llm_instance,
         prompt,
         system_prompt=system_prompt,
         history_messages=history_messages,
