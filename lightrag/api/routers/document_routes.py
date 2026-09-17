@@ -2504,6 +2504,17 @@ async def pipeline_index_file(
         success, _ = await pipeline_enqueue_file(
             rag, file_path, track_id, admission_token=admission_token
         )
+        # Release the reservation now that the enqueue write is done, not
+        # after processing: pending_enqueues exists to block a concurrent
+        # scan/manual-drain from racing this doc_status write (see
+        # _reserve_enqueue_slot), and every reader of it -- the scan refusal,
+        # and DRAIN_TO_IDLE's CONTINUE_DRAIN_WAIT -- is documented as bounded
+        # by "the background enqueue's own duration", not by how long
+        # processing takes. Holding it through apipeline_process_enqueue_documents
+        # below breaks that bound: a manual retry that lands on this same run
+        # would then wait on a count only this call's own return can zero.
+        if admission_token is not None:
+            await _release_enqueue_slot(rag, admission_token)
         if success:
             await rag.apipeline_process_enqueue_documents()
 
@@ -2771,6 +2782,11 @@ async def pipeline_index_texts(
         # See pipeline_enqueue_file: only forwarded when a reservation exists.
         enqueue_kwargs["admission_token"] = admission_token
     await rag.apipeline_enqueue_documents(**enqueue_kwargs)
+    # See pipeline_index_file: release right after the enqueue write, before
+    # driving processing, so pending_enqueues stays bounded by the enqueue
+    # itself rather than by however long this run's processing takes.
+    if admission_token is not None:
+        await _release_enqueue_slot(rag, admission_token)
     await rag.apipeline_process_enqueue_documents()
 
 

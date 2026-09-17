@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import pytest
@@ -165,3 +166,62 @@ async def test_disabled_admission_never_counts():
     assert await _document_routes._reserve_enqueue_slot(rag, "tok-1") is True
 
     assert rag.doc_status.calls == 0
+
+
+async def test_pipeline_index_file_releases_reservation_before_processing(
+    monkeypatch,
+):
+    """pending_enqueues exists to block a scan/manual-drain from racing the
+    doc_status write, and every reader of it is documented as bounded by the
+    ENQUEUE's own duration, not by however long processing takes. The slot
+    must therefore be free before apipeline_process_enqueue_documents runs,
+    not only after it returns."""
+    rag = await _rag(capacity=10)
+    await _document_routes._reserve_enqueue_slot(rag, "tok-1")
+
+    monkeypatch.setattr(
+        _document_routes,
+        "pipeline_enqueue_file",
+        AsyncMock(return_value=(True, "track-1")),
+    )
+
+    seen_pending_enqueues = []
+
+    async def _fake_process():
+        status = await _status(rag)
+        seen_pending_enqueues.append(status["pending_enqueues"])
+
+    rag.apipeline_process_enqueue_documents = _fake_process
+
+    await _document_routes.pipeline_index_file(
+        rag, "unused-path", "track-1", admission_token="tok-1"
+    )
+
+    assert seen_pending_enqueues == [0]
+
+
+async def test_pipeline_index_texts_releases_reservation_before_processing(
+    monkeypatch,
+):
+    rag = await _rag(capacity=10)
+    await _document_routes._reserve_enqueue_slot(rag, "tok-1")
+    rag.apipeline_enqueue_documents = AsyncMock(return_value=None)
+
+    seen_pending_enqueues = []
+
+    async def _fake_process():
+        status = await _status(rag)
+        seen_pending_enqueues.append(status["pending_enqueues"])
+
+    rag.apipeline_process_enqueue_documents = _fake_process
+
+    await _document_routes.pipeline_index_texts(
+        rag,
+        ["hello"],
+        file_sources=["a.txt"],
+        track_id="track-1",
+        resolved_chunking=({}, {}),
+        admission_token="tok-1",
+    )
+
+    assert seen_pending_enqueues == [0]
