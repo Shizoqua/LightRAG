@@ -2223,6 +2223,30 @@ class TestDocStatusStorage:
         assert "bad status" in error_text
 
     @pytest.mark.asyncio
+    async def test_delete_raises_on_bulk_item_failures(
+        self, global_config, embed_func, mock_client
+    ):
+        """delete() must surface a bulk per-item failure, not report success.
+
+        A rollback path (lightrag.py's create-mode undo) treats a successful
+        doc_status.delete() as proof the row is gone; a swallowed failure here
+        would report that rollback as done while the row stays behind.
+        """
+        with patch.object(ClientManager, "get_client", return_value=mock_client):
+            with patch(
+                "lightrag.kg.opensearch_impl.helpers.async_bulk", new_callable=AsyncMock
+            ) as mock_bulk:
+                mock_bulk.return_value = (
+                    0,
+                    [{"delete": {"_id": "d1", "status": 500, "error": "down"}}],
+                )
+                s = self._make(global_config, embed_func)
+                await s.initialize()
+                with pytest.raises(RuntimeError) as excinfo:
+                    await s.delete(["d1"])
+        assert "d1" in str(excinfo.value)
+
+    @pytest.mark.asyncio
     async def test_get_status_counts(self, global_config, embed_func, mock_client):
         mock_client.search = AsyncMock(
             return_value={

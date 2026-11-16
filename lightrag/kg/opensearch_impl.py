@@ -3583,7 +3583,16 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
             return True
 
     async def delete(self, ids: list[str]) -> None:
-        """Delete document status records by IDs."""
+        """Delete document status records by IDs.
+
+        Mirrors ``upsert``'s failure handling: ``raise_on_error=False`` means
+        a per-item bulk failure (408/429/5xx, or a permanent 4xx other than a
+        benign delete-404) never raises out of ``async_bulk`` itself, so the
+        ``failed`` list it returns must be inspected and raised on here. A
+        caller such as the create-mode rollback in ``lightrag.py`` treats a
+        successful ``delete()`` as proof the row is gone; silently returning
+        while rows remain would report that rollback as done when it is not.
+        """
         if not ids:
             return
         if not self._index_ready:
@@ -3599,7 +3608,7 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
                 {"_op_type": "delete", "_index": self._index_name, "_id": doc_id}
                 for doc_id in ids
             ]
-            await _run_chunked_async_bulk(
+            _, failed = await _run_chunked_async_bulk(
                 self.client,
                 actions,
                 max_payload_bytes=self._max_upsert_payload_bytes,
@@ -3614,6 +3623,22 @@ class OpenSearchDocStatusStorage(DocStatusStorage):
                 self._mark_index_missing()
                 return
             logger.error(f"[{self.workspace}] Error deleting doc statuses: {e}")
+            raise
+
+        retryable_ids, non_retryable_ops = _extract_bulk_failed_ids(failed)
+        if retryable_ids or non_retryable_ops:
+            retryable_sample = ", ".join(sorted(retryable_ids)[:5])
+            permanent_sample = ", ".join(
+                f"{op.op}/{op.doc_id}/status={op.status}/{op.error}"
+                for op in non_retryable_ops[:5]
+            )
+            raise RuntimeError(
+                f"[{self.workspace}] {self.namespace} delete: "
+                f"{len(retryable_ids)} retryable and "
+                f"{len(non_retryable_ops)} non-retryable doc-status delete "
+                f"ops failed. Retryable sample: {retryable_sample}; "
+                f"Permanent sample: {permanent_sample}"
+            )
 
     async def drop(self) -> dict[str, str]:
         """Delete the entire doc status index."""
