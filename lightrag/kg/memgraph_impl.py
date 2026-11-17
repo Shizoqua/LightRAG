@@ -101,7 +101,7 @@ class MemgraphStorage(BaseGraphStorage):
                     try:
                         workspace_label = self._get_workspace_label()
                         await session.run(
-                            f"""CREATE INDEX ON :{workspace_label}(entity_id)"""
+                            f"""CREATE INDEX ON :`{workspace_label}`(entity_id)"""
                         )
                         logger.info(
                             f"[{self.workspace}] Created index on :{workspace_label}(entity_id) in Memgraph."
