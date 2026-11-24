@@ -38,6 +38,7 @@ from lightrag.utils import (
 )
 from lightrag.exceptions import (
     CommitBookkeepingError,
+    CorruptStorageRecordError,
     SourceConflictRepairCASError,
     StorageControlPlaneError,
     StorageNotInitializedError,
@@ -193,17 +194,33 @@ class JsonDocStatusStorage(DocStatusStorage):
         async with self._storage_lock:
             return set(keys) - set(self._data.keys())
 
+    def _as_row(self, key: str, value: Any) -> Any:
+        """Refuse a stored payload that is not a row, naming it.
+
+        Mirrors ``JsonKVStorage._as_row``: a key mapped to a string or a
+        number -- a hand-edited file, a truncated one repaired by hand, a
+        foreign writer -- must not reach a caller that expects
+        ``dict[str, Any] | None`` (the ``get_by_id`` / ``get_by_id_strict``
+        contract). Raise the damage by name instead of handing back a value
+        whose shape the caller never asked for.
+        """
+        if value is not None and not isinstance(value, dict):
+            raise CorruptStorageRecordError(
+                f"[{self.workspace}] {self.namespace} record {key!r} in "
+                f"{self._file_name} is {type(value).__name__}, not a mapping: "
+                f"{value!r}"
+            )
+        return value
+
     async def get_by_ids(self, ids: list[str]) -> list[dict[str, Any]]:
         ordered_results: list[dict[str, Any] | None] = []
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
             for id in ids:
-                data = self._data.get(id, None)
+                data = self._as_row(id, self._data.get(id, None))
                 if data:
-                    ordered_results.append(
-                        copy.deepcopy(data) if isinstance(data, dict) else data
-                    )
+                    ordered_results.append(copy.deepcopy(data))
                 else:
                     ordered_results.append(None)
         return ordered_results
@@ -464,8 +481,8 @@ class JsonDocStatusStorage(DocStatusStorage):
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
-            data = self._data.get(id)
-            return copy.deepcopy(data) if isinstance(data, dict) else data
+            data = self._as_row(id, self._data.get(id))
+            return copy.deepcopy(data) if data is not None else data
 
     async def get_docs_paginated(
         self,
@@ -731,14 +748,16 @@ class JsonDocStatusStorage(DocStatusStorage):
     async def get_by_id_strict(self, id: str) -> Union[dict[str, Any], None]:
         """Strict point read: complete-or-raise (base contract).
 
-        In-memory shared dict — a miss is a confirmed absence; the only
-        failure surface is uninitialized storage, which raises.
+        In-memory shared dict — a miss is a confirmed absence; the other
+        failure surfaces are uninitialized storage and a damaged record,
+        both of which raise rather than hand back a non-mapping value in
+        place of ``dict | None``.
         """
         if self._storage_lock is None:
             raise StorageNotInitializedError("JsonDocStatusStorage")
         async with self._storage_lock:
-            row = self._data.get(id)
-        return copy.deepcopy(row) if isinstance(row, dict) else row
+            row = self._as_row(id, self._data.get(id))
+        return copy.deepcopy(row) if row is not None else row
 
     async def get_doc_by_content_hash(
         self, content_hash: str, *, exclude_doc_id: str | None = None
